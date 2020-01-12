@@ -1,0 +1,176 @@
+#Script to look at each vCenter, find VMs that are greater than 4TB in allocated size and then unchecks the 'Keep vmdk together' flag
+#to keep vmdks seperate thus preventing datastore blowouts from rapid growth of these large VMs
+# 
+
+#Initial variables
+
+$m_vCenter = @()
+$c_vCenter = @()
+$sites = @("zz","PP")
+
+#get array of sites and establishe connections to vcenters
+
+foreach ($site in $sites) {
+	$m_vCenter = $site + "01-m-vc.vcloud-int.net"
+	$c_vCenter = $site + "01-1-vc1.vclound-int.net"
+	
+	Connect-VIServer $m_vcenter
+	Connect-VIServer $c_vCenter
+
+$m_VMs = Get-VM -Server $m_vCenter
+$c_VMs = Get-VM -Server $c_vCenter
+
+
+
+# Management vCenter VMs:
+
+Foreach ($VM in $m_VMs)
+{
+$target = $VM | Select-Object Name, @{N="Size"; E={(Get-VmSize($_))/1GB}}, @{N="DiskCount"; E={(Get-HardDisk($vm) | measure).count}} 
+
+$target
+
+if (($target.size -gt 4000) -and ($target.DiskCount -ge 2))
+
+	{ 
+	Set-SDRSIntraVMAffinity -VM $vm -DatastoreCluster ($vm | Get-DatastoreCluster).name
+	}
+}
+
+
+
+#Customer vCenter VMs:
+
+Foreach ($VM in $c_VMs){
+
+$target = $VM | Select-Object Name, @{N="Size"; E={(Get-VmSize($_))/1GB}}, @{N="DiskCount"; E={(Get-HardDisk($vm) | measure).count}} 
+
+$target
+
+if (($target.size -gt 4000) -and ($target.DiskCount -ge 2))
+
+		{ 
+		Set-SDRSIntraVMAffinity -VM $vm -DatastoreCluster ($vm | Get-DatastoreCluster).name
+		}
+	
+	}
+Disconnect-VIServer -Force -Confirm:$false -Server $m_vCenter
+Disconnect-VIServer -Force -Confirm:$false -Server $c_vCenter
+}
+
+
+
+
+
+
+
+function Get-VmSize{
+
+    #Initialize variables
+    $VmDirs =@()
+    $VmSize = 0
+
+    $searchSpec = New-Object VMware.Vim.HostDatastoreBrowserSearchSpec
+    $searchSpec.details = New-Object VMware.Vim.FileQueryFlags
+    $searchSpec.details.fileSize = $TRUE
+
+    Get-View -VIObject $vm | % {
+        #Create an array with the vm's directories
+        $VmDirs += $_.Config.Files.VmPathName.split("/")[0]
+        $VmDirs += $_.Config.Files.SnapshotDirectory.split("/")[0]
+        $VmDirs += $_.Config.Files.SuspendDirectory.split("/")[0]
+        $VmDirs += $_.Config.Files.LogDirectory.split("/")[0]
+        #Add directories of the vm's virtual disk files
+        foreach ($disk in $_.Layout.Disk) {
+            foreach ($diskfile in $disk.diskfile){
+                $VmDirs += $diskfile.split("/")[0]
+            }
+        }
+        #Only take unique array items
+        $VmDirs = $VmDirs | Sort | Get-Unique
+
+        foreach ($dir in $VmDirs){
+            $ds = Get-Datastore ($dir.split("[")[1]).split("]")[0]
+            $dsb = Get-View (($ds | get-view).Browser)
+            $taskMoRef  = $dsb.SearchDatastoreSubFolders_Task($dir,$searchSpec)
+            $task = Get-View $taskMoRef 
+
+            while($task.Info.State -eq "running" -or $task.Info.State -eq "queued"){$task = Get-View $taskMoRef }
+            foreach ($result in $task.Info.Result){
+                foreach ($file in $result.File){
+                    $VmSize += $file.FileSize
+                }
+            }
+        }
+    }
+
+    return  $VMSize
+}
+
+
+
+
+
+
+function Set-SdrsIntraVmAffinity {
+<#  
+#.SYNOPSIS  Configure SDRS Intra-VM affinity   
+#.DESCRIPTION The function will set a large (<4TB) VM's Keep vmdk together flag off
+#.NOTES  Author:  Luc Dekens; Modified by Mike Breclaw
+#.PARAMETER VM
+#  The vm that has > 4TB worth of allocated storage
+#.PARAMETER DatastoreCLuster
+#  The datastorecluster where the VM resides
+#.EXAMPLE
+#  PS> Set-SdrsAntiAffinity -VM $vm -datastorecluster $datastorecluster
+#.EXAMPLE
+#   PS> Get-VM -Name VM1 | Set-SdrsAntiAffinity 
+#.EXAMPLE
+#	PS> Set-SdrsAntiAffinity -VM $vm -DatastoreCluster ($vm | Get-DatastoreCluster).name
+##>
+ 
+  param(
+    [CmdletBinding()]
+	
+    [Parameter(Mandatory=$true,
+      ValueFromPipeline=$true)]
+    [PSObject]$VM,
+	
+    [Parameter (Mandatory=$false)]
+    [ValidateCount(2,60)]
+    [int[]]$Harddisk,
+	    	
+    [Parameter(Mandatory=$true)]
+    [PSObject]$DatastoreCluster
+	
+    )
+ 
+  begin{
+    	$vm = Get-VM -Name $vm
+		
+    	$storMgr = Get-View StorageResourceManager 
+    
+		$DatastoreCluster = Get-DatastoreCluster -Name $DatastoreCluster
+    
+    	$spec = New-Object VMware.Vim.StorageDrsConfigSpec
+    
+		}
+ 
+  process{
+    
+        $spec.podConfigSpec = New-Object VMware.Vim.StorageDrsPodConfigSpec
+        $vmSpec = New-Object VMware.Vim.StorageDrsVmConfigSpec
+        $vmSpec.operation = "edit"
+        $vmSpec.info = New-Object VMware.Vim.StorageDrsVmConfigInfo 
+        $vmSpec.info.vm = $VM.ExtensionData.MoRef
+        $vmSpec.info.enabled = $true
+        $vmSpec.info.intraVmAffinity = $false
+        $spec.VmConfigSpec += $vmspec
+      		
+   		}
+  end
+  	
+	  {
+    $storMgr.ConfigureStorageDrsForPod($DatastoreCluster.ExtensionData.MoRef,$spec,$true)
+  	}
+}
