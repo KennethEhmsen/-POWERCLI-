@@ -14,11 +14,14 @@ Get-VMHost | %{
    $Report.Logical_cpu_num = $_.ExtensionData.Summary.Hardware.NumCpuThreads
    $Report.core_num = $_.ExtensionData.Hardware.CpuInfo.NumCpuCores
    $Report.TotalMemoryMB = $_.MemoryTotalMB
-   $Report.ip_address = ($_.NetworkInfo.VirtualNic | where {$_.name -eq "vmk0"}).ip
+   $Report.ip_address = (Get-VMHostNetworkAdapter -VMKernel -vmhost $HN | where {$_.name -eq "vmk0"}).ip
    $Report.P_nic = $_.ExtensionData.Config.Network.Pnic.count
    $Report.HyperthreadingEnabled = $_.ExtensionData.Config.HyperThread.Active
    $Report.Profile = (Get-VMHostProfile).Name
    $Report.EVCMode = (Get-Cluster -VMHost $HN).ExtensionData.Summary.CurrentEVCModeKey
    $HostReport += $Report
 }
+
 $HostReport
+
+
